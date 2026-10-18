@@ -7,6 +7,9 @@
 #include <sys/stat.h>  // for stat
 #include <unistd.h>    // for lseek
 
+#include <fcntl.h>    // 提供 open(), O_RDWR, O_CREAT 
+#include <unistd.h>   // 提供 close(), read(), write(), unlink() 
+
 #include <algorithm>
 #include <filesystem>
 #include <limits>
@@ -31,6 +34,11 @@ void DiskManager::write_page(int fd, page_id_t page_no, const char* offset, int 
     // 1.lseek()定位到文件头，通过(fd,page_no)可以定位指定页面及其在磁盘文件中的偏移量
     // 2.调用write()函数
     // 注意write返回值与num_bytes不等时 throw InternalError("DiskManager::write_page Error");
+    off_t file_offset = static_cast<off_t>(page_no) * PAGE_SIZE;
+    ssize_t bytes_written = pwrite(fd, offset, num_bytes, file_offset);
+    if (bytes_written != static_cast<ssize_t>(num_bytes)) {
+        throw InternalError("DiskManager::write_page Error");
+    }
 }
 
 /**
@@ -45,6 +53,11 @@ void DiskManager::read_page(int fd, page_id_t page_no, char* offset, int num_byt
     // 1.lseek()定位到文件头，通过(fd,page_no)可以定位指定页面及其在磁盘文件中的偏移量
     // 2.调用read()函数
     // 注意read返回值与num_bytes不等时，throw InternalError("DiskManager::read_page Error");
+    off_t file_offset = static_cast<off_t>(page_no) * PAGE_SIZE;
+    ssize_t bytes_read = pread(fd, offset, num_bytes, file_offset);
+    if (bytes_read != static_cast<ssize_t>(num_bytes)) {
+        throw InternalError("DiskManager::read_page Error");
+    }
 }
 
 /**
@@ -107,6 +120,15 @@ void DiskManager::create_file(const std::string& path) {
     // Todo:
     // 调用open()函数，使用O_CREAT模式
     // 注意不能重复创建相同文件
+    if (is_file(path)) {
+        throw FileExistsError("DiskManager::create_file Error: file already exists");
+    }
+
+    int fd = open(path.c_str(), O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (fd == -1) {
+        throw InternalError("DiskManager::create_file Error: create failed");
+    }
+    close(fd);
 }
 
 /**
@@ -117,6 +139,17 @@ void DiskManager::destroy_file(const std::string& path) {
     // Todo:
     // 调用unlink()函数
     // 注意不能删除未关闭的文件
+    if (!is_file(path)) {
+        throw FileNotFoundError("DiskManager::destroy_file Error: file not found");
+    }
+
+    if (path2fd_.find(path) != path2fd_.end()) {
+        throw FileNotClosedError("DiskManager::destroy_file Error: file not closed");
+    }
+
+    if (unlink(path.c_str()) != 0) {
+        throw InternalError("DiskManager::destroy_file Error: unlink failed");
+    }
 }
 
 /**
@@ -128,7 +161,19 @@ int DiskManager::open_file(const std::string& path) {
     // Todo:
     // 调用open()函数，使用O_RDWR模式
     // 注意不能重复打开相同文件，并且需要更新文件打开列表
-    return -1;
+    auto it = path2fd_.find(path);
+    if (it != path2fd_.end()) {
+        return it->second;  // 已打开，返回已有 fd
+    }
+
+    int fd = open(path.c_str(), O_RDWR);
+    if (fd == -1) {
+        throw FileNotFoundError("DiskManager::open_file Error: file not found");
+    }
+
+    path2fd_[path] = fd;
+    fd2path_[fd] = path;
+    return fd;
 }
 
 /**
@@ -139,6 +184,15 @@ void DiskManager::close_file(int fd) {
     // Todo:
     // 调用close()函数
     // 注意不能关闭未打开的文件，并且需要更新文件打开列表
+    auto it = fd2path_.find(fd);
+    if (it == fd2path_.end()) {
+        throw InternalError("DiskManager::close_file Error: file not opened");
+    }
+
+    std::string path = it->second;
+    close(fd);
+    fd2path_.erase(it);
+    path2fd_.erase(path);
 }
 
 /**
