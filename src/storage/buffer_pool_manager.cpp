@@ -7,18 +7,16 @@
  * @description: 从free_list或replacer中得到可淘汰帧页的 *frame_id
  */
 bool BufferPoolManager::find_victim_page(frame_id_t* frame_id) {
-    // 1.1 未满，直接拿空闲帧
+    
+    // 1. 未满，直接拿空闲帧
     if (!free_list_.empty()) {
         *frame_id = free_list_.front();
         free_list_.pop_front();
         return true;
     }
-    
-    // 1.2 已满，用 LRU 找淘汰者
-    if (replacer_->victim(frame_id)) {
-        return true;
-    }
-    return false;
+
+    // 2. 已满，用 LRU 找淘汰者
+    return replacer_->victim(frame_id);
 }
 
 /**
@@ -129,19 +127,22 @@ bool BufferPoolManager::flush_page(PageId page_id) {
  * @description: 创建一个新的page
  */
 Page* BufferPoolManager::new_page(PageId* page_id) {
-    std::scoped_lock lock(latch_); 
+
+    std::scoped_lock lock(latch_);
 
     frame_id_t frame_id;
-    if (!find_victim_page(&frame_id)) return nullptr;
+    if (!find_victim_page(&frame_id)) {
+        return nullptr;
+    }
 
-    // 【核心修复】保留测试传入的 fd，只分配新的 page_no
+    // 保留调用方传入的 fd，只分配新的 page_no
     PageId new_id;
-    new_id.fd = page_id->fd; 
-    new_id.page_no = disk_manager_->allocate_page(page_id->fd); 
+    new_id.fd = page_id->fd;
+    new_id.page_no = disk_manager_->allocate_page(page_id->fd);
     *page_id = new_id;
 
     Page* page = &pages_[frame_id];
-    
+
     // 移除旧的页表记录
     if (page->id_.page_no != INVALID_PAGE_ID) {
         page_table_.erase(page->id_);
@@ -150,12 +151,12 @@ Page* BufferPoolManager::new_page(PageId* page_id) {
     // 更新页的内容
     update_page(page, *page_id, frame_id);
 
-    // 更新页表！
+    // 更新页表
     page_table_[*page_id] = frame_id;
 
     page->pin_count_ = 1;
-    replacer_->pin(frame_id); 
-    
+    replacer_->pin(frame_id);
+
     return page;
 }
 
