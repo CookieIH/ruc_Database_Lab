@@ -35,3 +35,7 @@ deps/*
 !deps/nlohmann/
 .dockerignore
 
+ .vscode/setting.json
+src/storage/buffer_pool_manager.cpp
+page_guard_test.db
+BufferPoolManagerTest_db/concurrency_test

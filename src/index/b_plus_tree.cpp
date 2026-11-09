@@ -101,7 +101,19 @@ int BPlusTreeNode::lower_bound(const char* target) const {
     // 查找当前节点中第一个大于等于target的key，并返回key的位置给上层
     // 提示: 可以采用多种查找方式，如顺序遍历、二分查找等；使用compare_index_key()函数进行比较
 
-    return -1;
+    int left = 0;
+    int right = get_size();
+    while (left < right) {
+        int mid = left + (right - left) / 2;
+        // left_key 和 target 比较：<0 表示 left < target
+        int cmp = compare_index_key(get_key(mid), target, file_header_->column_types_, file_header_->column_lengths_);
+        if (cmp < 0) {
+            left = mid + 1; // mid 比 target 小，去右半边找
+        } else {
+            right = mid;    // mid 大于等于 target，记录下 mid，去左半边找有没有更早的
+        }
+    }
+    return left;
 }
 
 /**
@@ -115,7 +127,18 @@ int BPlusTreeNode::upper_bound(const char* target) const {
     // 查找当前节点中第一个大于target的key，并返回key的位置给上层
     // 提示: 可以采用多种查找方式：顺序遍历、二分查找等；使用compare_index_key()函数进行比较
 
-    return -1;
+    int left = 0;
+    int right = get_size();
+    while (left < right) {
+        int mid = left + (right - left) / 2;
+        int cmp = compare_index_key(get_key(mid), target, file_header_->column_types_, file_header_->column_lengths_);
+        if (cmp <= 0) {
+            left = mid + 1; // mid 小于等于 target，去右半边找
+        } else {
+            right = mid;    // mid 严格大于 target，记录下 mid，去左半边找
+        }
+    }
+    return left;
 }
 
 /**
@@ -133,6 +156,17 @@ bool BPlusTreeNode::leaf_lookup(const char* key, Rid** value) {
     // 3. 如果存在，获取key对应的Rid，并赋值给传出参数value
     // 提示：可以调用lower_bound()和get_rid()函数。
 
+    // 1. 找到第一个 >= key 的位置
+    int pos = lower_bound(key);
+    
+    // 2. 如果没越界，并且该位置的键确实等于 key
+    if (pos < get_size()) {
+        int cmp = compare_index_key(get_key(pos), key, file_header_->column_types_, file_header_->column_lengths_);
+        if (cmp == 0) {
+            *value = get_rid(pos); // 赋值返回给上层
+            return true;
+        }
+    }
     return false;
 }
 
@@ -147,7 +181,17 @@ page_id_t BPlusTreeNode::internal_lookup(const char* key) {
     // 2. 获取该孩子节点（子树）所在页面的编号
     // 3. 返回页面编号
 
-    return -1;
+    // 找第一个 > key 的位置
+    int pos = upper_bound(key);
+    
+    // 如果 pos == 0，说明 key 比所有的键都小。
+    // 在标准 B+ 树中，内部节点的 key[0] 通常是无效的（或者是全树最小值哨兵），
+    // 所以如果 pos == 0，依然应该走 value[0]。
+    // 如果 pos > 0，说明 key 落在 [key[pos-1], key[pos]) 区间，走 value[pos-1]。
+    if (pos == 0) {
+        return value_at(0);
+    }
+    return value_at(pos - 1);
 }
 
 /**
