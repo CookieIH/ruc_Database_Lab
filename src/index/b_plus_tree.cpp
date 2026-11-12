@@ -303,7 +303,27 @@ std::pair<IndexNode, bool> BPlusTree::find_leaf_page(const char* key,
     // 2. 从根节点开始不断向下查找目标key
     // 3. 找到包含该key值的叶子结点停止查找，并返回叶子节点
 
-    return {IndexNode{}, false};
+    // 空树或根节点无效检查
+    if (file_header_ -> root_page_ == INDEX_NO_PAGE) {
+        return {IndexNode(), false};
+    }
+
+    IndexNode node = fetch_node(file_header_ -> root_page_);
+    if (!node.valid()) {
+        return {IndexNode(), false};
+    }
+
+    while (!node->is_leaf_page()) {
+        page_id_t child_page_no;
+        if (find_first) {
+            child_page_no = node->value_at(0);
+        } else {
+            child_page_no = node->internal_lookup(key);
+        }
+        node = fetch_node(child_page_no);
+    }
+
+    return {std::move(node), true};
 }
 
 /**
@@ -322,7 +342,40 @@ bool BPlusTree::get_value(const char* key, std::vector<Rid>* result, Transaction
     // 思考：同一 key 的记录跨越多个叶子时，第 1 步找到的叶子是否一定包含第一条？
     // 提示：IndexNode 离开作用域即 unpin。
 
-    return false;
+    IndexPosition pos = lower_bound(key);
+    IndexPosition end_pos = upper_bound(key);
+
+    // 空树或没找到
+    if (pos.page_no == INDEX_NO_PAGE || pos == end_pos) {
+        return false;
+    }
+
+    bool found_any = false;
+
+    while (pos != end_pos) {
+        IndexNode leaf = fetch_node(pos.page_no);
+        int leaf_size = leaf->get_size();
+
+        int end_slot = (end_pos.page_no == pos.page_no) ? end_pos.slot_no : leaf_size;
+
+        for (int i = pos.slot_no; i < end_slot; i++) {
+            result->push_back(*leaf->get_rid(i));
+            found_any = true;
+        }
+
+        if (end_pos.page_no == pos.page_no) {
+            break;
+        }
+
+        page_id_t next_page = leaf->get_next_leaf();
+        if (next_page == INDEX_NO_PAGE) {
+            break; 
+        }
+        pos.page_no = next_page;
+        pos.slot_no = 0;
+    }
+
+    return found_any;
 }
 
 /**
@@ -528,7 +581,24 @@ IndexPosition BPlusTree::lower_bound(const char* key) {
     // 2. 按上面的位置规范调整返回值
     // 思考：非唯一索引中，“第一个 >= key”的索引项可能在哪个叶子里？
 
-    return IndexPosition{.page_no = INDEX_NO_PAGE, .slot_no = -1};
+    auto [leaf, found] = find_leaf_page(key, IndexOperation::Find, nullptr);
+    if (!found) {
+        // 空树时，直接返回占位符，调用者会处理
+        return {INDEX_NO_PAGE, -1};
+    }
+
+    int slot = leaf->lower_bound(key);
+
+    while (slot == leaf->get_size()) {
+        page_id_t next_page = leaf->get_next_leaf();
+        if (next_page == INDEX_NO_PAGE) {
+            return leaf_end();
+        }
+        leaf = fetch_node(next_page);
+        slot = leaf->lower_bound(key); // 下一叶重新找（其实从0开始找即可，但通用写 lower_bound 也没问题）
+    }
+
+    return IndexPosition{leaf->get_page_no(), slot};
 }
 
 /**
@@ -543,7 +613,23 @@ IndexPosition BPlusTree::upper_bound(const char* key) {
     // 1. 找到可能包含目标 key 的叶子，并在叶子内定位
     // 2. 按 lower_bound() 的位置规范调整返回值
 
-    return IndexPosition{.page_no = INDEX_NO_PAGE, .slot_no = -1};
+    auto [leaf, found] = find_leaf_page(key, IndexOperation::Find, nullptr);
+    if (!found) {
+        return {INDEX_NO_PAGE, -1};
+    }
+
+    int slot = leaf->upper_bound(key);
+
+    while (slot == leaf->get_size()) {
+        page_id_t next_page = leaf->get_next_leaf();
+        if (next_page == INDEX_NO_PAGE) {
+            return leaf_end();
+        }
+        leaf = fetch_node(next_page);
+        slot = leaf->upper_bound(key);
+    }
+
+    return IndexPosition{leaf->get_page_no(), slot};
 }
 
 /**
