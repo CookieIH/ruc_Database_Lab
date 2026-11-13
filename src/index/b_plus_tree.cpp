@@ -210,12 +210,26 @@ page_id_t BPlusTreeNode::internal_lookup(const char* key) {
  *                      key           key_slot
  */
 void BPlusTreeNode::insert_pairs(int pos, const char* key, const Rid* rid, int n) {
-    // Todo:
     // 1. 判断pos的合法性
-    // 2. 通过key获取n个连续键值对的key值，并把n个key值插入到pos位置
-    // 3. 通过rid获取n个连续键值对的rid值，并把n个rid值插入到pos位置
-    // 4. 更新当前节点的键数量
+     if (pos < 0 || pos > get_size()) throw InternalError("insert_pairs: invalid pos");
+    if (n <= 0) return;
+
+    const int old_size = get_size();
+    const size_t key_len = static_cast<size_t>(file_header_->key_length_);
+
+    // 移动原有数据
+    if (pos < old_size) {
+        memmove(get_key(pos + n), get_key(pos), static_cast<size_t>(old_size - pos) * key_len);
+        memmove(get_rid(pos + n), get_rid(pos), static_cast<size_t>(old_size - pos) * sizeof(Rid));
+    }
+    
+    // 插入新数据
+    if (key != nullptr) memcpy(get_key(pos), key, static_cast<size_t>(n) * key_len);
+    if (rid != nullptr) memcpy(get_rid(pos), rid, static_cast<size_t>(n) * sizeof(Rid));
+
+    set_size(old_size + n);
 }
+
 
 /**
  * @brief 用于在结点中插入单个键值对。
@@ -226,12 +240,9 @@ void BPlusTreeNode::insert_pairs(int pos, const char* key, const Rid* rid, int n
  * @return int 键值对数量
  */
 int BPlusTreeNode::insert(const char* key, const Rid& value) {
-    // Todo:
-    // 1. 查找要插入的键值对应该插入到当前节点的哪个位置
-    // 2. 插入键值对并保持有序；相同 key 可以并存（插在已有相同 key 的后面）
-    // 3. 返回完成插入操作之后的键值对数量
-
-    return -1;
+    int pos = upper_bound(key);
+    insert_pair(pos, key, value);
+    return get_size();
 }
 
 /**
@@ -385,14 +396,55 @@ bool BPlusTree::get_value(const char* key, std::vector<Rid>* result, Transaction
  * @note 返回的 IndexNode 拥有新页的 pin；原 node 仍由调用方持有。
  */
 IndexNode BPlusTree::split(IndexNode& node) {
-    // Todo:
-    // 1. 将原结点的键值对平均分配，右半部分分裂为新的右兄弟结点
-    //    需要初始化新节点的page_hdr内容
-    // 2. 如果新的右兄弟结点是叶子结点，更新新旧节点的prev_leaf和next_leaf指针
-    //    为新节点分配键值对，更新旧节点的键值对数记录
-    // 3. 如果新的右兄弟结点不是叶子结点，更新该结点的所有孩子结点的父节点信息(使用BPlusTree::update_child_parent())
+     IndexNode new_node = create_node();
+    if (!new_node.valid()) throw InternalError("split: failed to create new node");
 
-    return {};
+    const int old_size = node->get_size();
+    const int split_pos = old_size / 2;
+    const bool is_leaf = node->is_leaf_page();
+
+    // 初始化新节点
+    new_node->set_is_leaf(is_leaf);
+    new_node->set_size(0);
+    new_node->set_parent_page_no(node->get_parent_page_no());
+    new_node->set_prev_leaf(INDEX_NO_PAGE);
+    new_node->set_next_leaf(INDEX_NO_PAGE);
+
+    // 挪动右半边数据
+    for (int i = split_pos; i < old_size; ++i) {
+        new_node->insert_pair(new_node->get_size(), node->get_key(i), *node->get_rid(i));
+    }
+    node->set_size(split_pos);
+
+    if (is_leaf) {
+        const page_id_t node_next = node->get_next_leaf();
+        new_node->set_prev_leaf(node->get_page_no());
+        new_node->set_next_leaf(node_next);
+        node->set_next_leaf(new_node->get_page_no());
+
+        if (node_next == INDEX_LEAF_HEADER_PAGE) {
+            IndexNode sentinel = fetch_node(INDEX_LEAF_HEADER_PAGE);
+            if (sentinel.valid()) {
+                sentinel->set_prev_leaf(new_node->get_page_no());
+                sentinel.mark_dirty();
+            }
+            file_header_->last_leaf_ = new_node->get_page_no();
+        } else {
+            IndexNode next_leaf = fetch_node(node_next);
+            if (next_leaf.valid()) {
+                next_leaf->set_prev_leaf(new_node->get_page_no());
+                next_leaf.mark_dirty();
+            }
+        }
+    } else {
+        for (int i = 0; i < new_node->get_size(); ++i) {
+            update_child_parent(new_node, i);
+        }
+    }
+
+    node.mark_dirty();
+    new_node.mark_dirty();
+    return new_node;
 }
 
 /**
@@ -414,32 +466,110 @@ void BPlusTree::insert_into_parent(IndexNode& old_node,
                                    const char* key,
                                    IndexNode& new_node,
                                    Transaction* transaction) {
-    // Todo:
-    // 1. 分裂前的结点（原结点, old_node）是否为根结点，如果为根结点需要分配新的root
-    // 2. 获取原结点（old_node）的父亲结点
-    // 3. 获取key对应的rid，并将(key, rid)插入到父亲结点
-    // 4. 如果父亲结点仍需要继续分裂，则进行递归插入
-    // 提示：不要手动 unpin；IndexNode 析构会释放 pin。
+      (void)transaction;
+
+    // 如果老节点是根，创建新根
+    if (old_node->is_root_page()) {
+        IndexNode new_root = create_node();
+        if (!new_root.valid()) throw InternalError("insert_into_parent: failed to create new root");
+
+        new_root->set_is_leaf(false);
+        new_root->set_size(0);
+        new_root->set_parent_page_no(INDEX_NO_PAGE);
+        new_root->set_prev_leaf(INDEX_NO_PAGE);
+        new_root->set_next_leaf(INDEX_NO_PAGE);
+
+        // 新根的 0 号元素必须是最左侧的真实最小 key！
+        // 因为 old_node 是最左侧，顺下去找叶子
+        IndexNode curr = fetch_node(old_node->get_page_no());
+        while (!curr->is_leaf_page()) {
+            curr = fetch_node(curr->value_at(0));
+        }
+        std::vector<char> actual_min_key(file_header_->key_length_);
+        memcpy(actual_min_key.data(), curr->get_key(0), file_header_->key_length_);
+
+        new_root->insert_pair(0, actual_min_key.data(), Rid{.page_no = old_node->get_page_no(), .slot_no = -1});
+        new_root->insert_pair(1, key, Rid{.page_no = new_node->get_page_no(), .slot_no = -1});
+
+        old_node->set_parent_page_no(new_root->get_page_no());
+        new_node->set_parent_page_no(new_root->get_page_no());
+        set_root_page(new_root->get_page_no());
+
+        old_node.mark_dirty();
+        new_node.mark_dirty();
+        new_root.mark_dirty();
+        return;
+    }
+
+    // 否则插入现有父节点
+    IndexNode parent = fetch_node(old_node->get_parent_page_no());
+    if (!parent.valid()) throw InternalError("insert_into_parent: failed to fetch parent");
+
+    int old_index = parent->find_child(&old_node.node());
+    if (old_index >= parent->get_size()) throw InternalError("insert_into_parent: old_node not found");
+
+    int insert_pos = old_index + 1;
+    parent->insert_pair(insert_pos, key, Rid{.page_no = new_node->get_page_no(), .slot_no = -1});
+    new_node->set_parent_page_no(parent->get_page_no());
+    
+    parent.mark_dirty();
+    new_node.mark_dirty();
+
+    // 父节点满了，继续向上分裂
+    if (parent->get_size() >= parent->get_max_size()) {
+        IndexNode new_parent = split(parent);
+        
+        // 递归时，同样保证传给祖父节点的 key 是 new_parent 子树的最真实最小 key
+        IndexNode np_curr = fetch_node(new_parent->get_page_no());
+        while (!np_curr->is_leaf_page()) {
+            np_curr = fetch_node(np_curr->value_at(0));
+        }
+        std::vector<char> np_min_key(file_header_->key_length_);
+        memcpy(np_min_key.data(), np_curr->get_key(0), file_header_->key_length_);
+
+        insert_into_parent(parent, np_min_key.data(), new_parent, transaction);
+    }
 }
 
-/**
- * @brief 将指定键值对插入到B+树中
- * @param key 要插入的键。
- * @param value 键对应的 Rid。
- * @param transaction 事务指针
- * @return page_id_t 插入到的叶结点的page_no
- * @throws DuplicateKeyError 唯一索引中已存在相同 key，此时树保持不变。
- * @pre 调用方不会重复插入完全相同的 (key, value)。
- */
-page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction* transaction) {
-    // Todo:
-    // 1. 若 is_unique() 且 key 已存在，抛出 DuplicateKeyError
-    // 2. 查找 (key, value) 应该插入到哪个叶子节点
-    // 3. 在该叶子节点中插入键值对
-    // 4. 如果结点已满，分裂结点，并把新结点的相关信息插入父节点
-    // 提示：IndexNode 离开作用域即 unpin；若当前叶子是最右叶子，更新 file_header_->last_leaf_。
 
-    return -1;
+
+
+page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction* transaction) {
+     if (is_unique()) {
+        std::vector<Rid> existing;
+        if (get_value(key, &existing, transaction) && !existing.empty()) {
+            throw DuplicateKeyError();
+        }
+    }
+
+    auto [leaf, root_locked] = find_leaf_page(key, IndexOperation::Insert, transaction);
+    if (!leaf.valid()) throw InternalError("insert_entry: failed to find leaf");
+
+    leaf->insert(key, value);
+    leaf.mark_dirty();
+    const page_id_t leaf_page_no = leaf->get_page_no();
+
+    if (leaf->get_size() >= leaf->get_max_size()) {
+        IndexNode new_leaf = split(leaf);
+        insert_into_parent(leaf, new_leaf->get_key(0), new_leaf, transaction);
+    }
+
+    
+    if (file_header_->root_page_ != INDEX_NO_PAGE) {
+        IndexNode root = fetch_node(file_header_->root_page_);
+        if (root.valid() && !root->is_leaf_page()) {
+            // 顺着根节点的最左侧孩子 0 一路往下，找到真正的叶子最小 key
+            IndexNode curr = fetch_node(root->value_at(0));
+            while (!curr->is_leaf_page()) {
+                curr = fetch_node(curr->value_at(0));
+            }
+            // 强行覆盖根节点的 key[0]
+            root->set_key(0, curr->get_key(0));
+            root.mark_dirty();
+        }
+    }
+
+    return leaf_page_no;
 }
 
 /**
@@ -591,7 +721,7 @@ IndexPosition BPlusTree::lower_bound(const char* key) {
 
     while (slot == leaf->get_size()) {
         page_id_t next_page = leaf->get_next_leaf();
-        if (next_page == INDEX_NO_PAGE) {
+        if (next_page == INDEX_LEAF_HEADER_PAGE || next_page == INDEX_NO_PAGE) {
             return leaf_end();
         }
         leaf = fetch_node(next_page);
@@ -622,7 +752,7 @@ IndexPosition BPlusTree::upper_bound(const char* key) {
 
     while (slot == leaf->get_size()) {
         page_id_t next_page = leaf->get_next_leaf();
-        if (next_page == INDEX_NO_PAGE) {
+        if (next_page == INDEX_LEAF_HEADER_PAGE || next_page == INDEX_NO_PAGE) {
             return leaf_end();
         }
         leaf = fetch_node(next_page);

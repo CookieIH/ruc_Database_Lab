@@ -97,6 +97,8 @@ public:
 
     void set_parent_page_no(page_id_t parent) { page_header_->parent_page = parent; }
 
+    void set_is_leaf(bool is_leaf) { page_header_->is_leaf = is_leaf; }// 增添
+
     char* get_key(int key_idx) const {
         return keys_ + static_cast<std::ptrdiff_t>(key_idx) * file_header_->key_length_;
     }
