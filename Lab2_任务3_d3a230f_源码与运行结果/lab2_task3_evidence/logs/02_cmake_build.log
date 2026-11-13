@@ -1,0 +1,51 @@
+[  0%] Building CXX object src/CMakeFiles/rucbase_core.dir/analyze/analyzer.cpp.o
+[ 11%] Building CXX object src/CMakeFiles/rucbase_core.dir/common/context.cpp.o
+[ 11%] Building CXX object _deps/googletest-build/googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.o
+[ 11%] Building CXX object src/CMakeFiles/rucbase_core.dir/execution/execution_manager.cpp.o
+[ 15%] Building CXX object src/CMakeFiles/rucbase_core.dir/index/b_plus_tree.cpp.o
+[ 19%] Building CXX object src/CMakeFiles/rucbase_core.dir/index/index_manager.cpp.o
+[ 23%] Building CXX object src/CMakeFiles/rucbase_core.dir/index/index_scan.cpp.o
+/Users/destiny/Workbuddy/2026-11-13-20-54-07/ruc_Database_Lab/src/index/b_plus_tree.cpp:832:9: warning: ignoring return value of function declared with 'nodiscard' attribute [-Wunused-result]
+  832 |         released.drop();
+      |         ^~~~~~~~~~~~~
+1 warning generated.
+[ 26%] Building CXX object src/CMakeFiles/rucbase_core.dir/index/index_types.cpp.o
+[ 26%] Linking CXX static library ../../../lib/libgtest.a
+[ 30%] Building CXX object src/CMakeFiles/rucbase_core.dir/optimizer/planner.cpp.o
+[ 34%] Building CXX object src/CMakeFiles/rucbase_core.dir/portal/portal.cpp.o
+[ 38%] Building CXX object src/CMakeFiles/rucbase_core.dir/record/rm_file_handle.cpp.o
+[ 42%] Building CXX object src/CMakeFiles/rucbase_core.dir/record/rm_scan.cpp.o
+[ 42%] Built target gtest
+[ 46%] Building CXX object src/CMakeFiles/rucbase_core.dir/recovery/log_manager.cpp.o
+[ 50%] Building CXX object _deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/src/gtest_main.cc.o
+[ 53%] Building CXX object src/CMakeFiles/rucbase_core.dir/recovery/log_recovery.cpp.o
+[ 57%] Building CXX object src/CMakeFiles/rucbase_core.dir/replacer/lru_replacer.cpp.o
+[ 61%] Linking CXX static library ../../../lib/libgtest_main.a
+[ 65%] Building CXX object src/CMakeFiles/rucbase_core.dir/storage/buffer_pool_manager.cpp.o
+[ 65%] Built target gtest_main
+[ 65%] Building CXX object src/CMakeFiles/rucbase_core.dir/storage/disk_manager.cpp.o
+[ 69%] Building CXX object src/CMakeFiles/rucbase_core.dir/storage/page_guard.cpp.o
+[ 73%] Building CXX object src/CMakeFiles/rucbase_core.dir/system/sm_meta.cpp.o
+[ 76%] Building CXX object src/CMakeFiles/rucbase_core.dir/system/sm_manager.cpp.o
+[ 80%] Building CXX object src/CMakeFiles/rucbase_core.dir/transaction/concurrency/lock_manager.cpp.o
+[ 84%] Building CXX object src/CMakeFiles/rucbase_core.dir/transaction/transaction_manager.cpp.o
+[ 88%] Linking CXX static library ../lib/librucbase_core.a
+[ 88%] Built target rucbase_core
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_delete_test.dir/index/b_plus_tree_delete_test.cpp.o
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_delete_test.dir/index/b_plus_tree_invariant_checker.cpp.o
+[100%] Linking CXX executable ../../bin/lab2_b_plus_tree_delete_test
+[100%] Built target lab2_b_plus_tree_delete_test
+[  3%] Built target gtest
+[ 11%] Built target gtest_main
+[ 88%] Built target rucbase_core
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_duplicate_test.dir/index/b_plus_tree_duplicate_test.cpp.o
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_duplicate_test.dir/index/b_plus_tree_invariant_checker.cpp.o
+[100%] Linking CXX executable ../../bin/lab2_b_plus_tree_duplicate_test
+[100%] Built target lab2_b_plus_tree_duplicate_test
+[  3%] Built target gtest
+[ 11%] Built target gtest_main
+[ 88%] Built target rucbase_core
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_insert_test.dir/index/b_plus_tree_insert_test.cpp.o
+[ 96%] Building CXX object src/test/CMakeFiles/lab2_b_plus_tree_insert_test.dir/index/b_plus_tree_invariant_checker.cpp.o
+[100%] Linking CXX executable ../../bin/lab2_b_plus_tree_insert_test
+[100%] Built target lab2_b_plus_tree_insert_test

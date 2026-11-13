@@ -1,0 +1,25 @@
+Running main() from /Users/destiny/Workbuddy/2026-11-13-20-54-07/ruc_Database_Lab/deps/googletest/googletest/src/gtest_main.cc
+[==========] Running 8 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 8 tests from BPlusTreeDuplicateTest
+[ RUN      ] BPlusTreeDuplicateTest.NonUniqueKeepsDuplicatesInOneLeaf
+[       OK ] BPlusTreeDuplicateTest.NonUniqueKeepsDuplicatesInOneLeaf (154 ms)
+[ RUN      ] BPlusTreeDuplicateTest.NonUniqueDeleteRemovesOnlyMatchingRid
+[       OK ] BPlusTreeDuplicateTest.NonUniqueDeleteRemovesOnlyMatchingRid (131 ms)
+[ RUN      ] BPlusTreeDuplicateTest.DuplicatesSpanManyLeaves
+[       OK ] BPlusTreeDuplicateTest.DuplicatesSpanManyLeaves (149 ms)
+[ RUN      ] BPlusTreeDuplicateTest.DeleteDuplicatesAcrossLeaves
+[       OK ] BPlusTreeDuplicateTest.DeleteDuplicatesAcrossLeaves (141 ms)
+[ RUN      ] BPlusTreeDuplicateTest.RandomizedDuplicateWorkload
+[       OK ] BPlusTreeDuplicateTest.RandomizedDuplicateWorkload (171 ms)
+[ RUN      ] BPlusTreeDuplicateTest.UniqueIndexRejectsDuplicateKeys
+[       OK ] BPlusTreeDuplicateTest.UniqueIndexRejectsDuplicateKeys (145 ms)
+[ RUN      ] BPlusTreeDuplicateTest.UniqueRejectionLeavesTreeUnchanged
+[       OK ] BPlusTreeDuplicateTest.UniqueRejectionLeavesTreeUnchanged (138 ms)
+[ RUN      ] BPlusTreeDuplicateTest.UniqueAllowsReinsertAfterDelete
+[       OK ] BPlusTreeDuplicateTest.UniqueAllowsReinsertAfterDelete (146 ms)
+[----------] 8 tests from BPlusTreeDuplicateTest (1179 ms total)
+
+[----------] Global test environment tear-down
+[==========] 8 tests from 1 test suite ran. (1179 ms total)
+[  PASSED  ] 8 tests.
