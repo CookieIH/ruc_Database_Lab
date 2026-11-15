@@ -251,10 +251,20 @@ int BPlusTreeNode::insert(const char* key, const Rid& value) {
  * @param pos 要删除键值对的位置
  */
 void BPlusTreeNode::erase_pair(int pos) {
-    // Todo:
-    // 1. 删除该位置的key
-    // 2. 删除该位置的rid
-    // 3. 更新结点的键值对数量
+    // 1. 参数合法性：只允许删除 [0, size) 内的槽位
+    if (pos < 0 || pos >= get_size()) {
+        throw InternalError("erase_pair: invalid pos");
+    }
+    const int old_size = get_size();
+    const size_t key_len = static_cast<size_t>(file_header_->key_length_);
+    // 2. 键区与 Rid 区在页内分开连续存放，必须各自把 pos 之后的尾部整体前移一位
+    const int tail = old_size - pos - 1;
+    if (tail > 0) {
+        memmove(get_key(pos), get_key(pos + 1), static_cast<size_t>(tail) * key_len);
+        memmove(get_rid(pos), get_rid(pos + 1), static_cast<size_t>(tail) * sizeof(Rid));
+    }
+    // 3. 只缩 size，尾部残留字节不再被任何访问触及（所有读取都以 size 为界）
+    set_size(old_size - 1);
 }
 
 /**
@@ -264,11 +274,18 @@ void BPlusTreeNode::erase_pair(int pos) {
  * @return 完成删除操作后的键值对数量
  */
 int BPlusTreeNode::remove(const char* key, const Rid& rid) {
-    // Todo:
-    // 1. 查找 (key, rid) 所在的位置；同一 key 可能有多条，要同时匹配 rid
-    // 2. 如果存在则删除该键值对
-    // 3. 返回完成删除操作后的键值对数量
-
+    // 1. 先二分到第一个 >= key 的槽位，再只在「key 相等」的连续区间内比对 Rid；
+    //    普通索引允许重复 key，只按 key 删会误删同一 key 的其他记录。
+    int pos = lower_bound(key);
+    while (pos < get_size() &&
+           compare_index_key(get_key(pos), key, file_header_->column_types_, file_header_->column_lengths_) == 0) {
+        if (*get_rid(pos) == rid) {
+            erase_pair(pos);
+            return get_size();
+        }
+        ++pos;
+    }
+    // 2. 本结点没有该 (key, rid)：返回 -1，由上层决定沿叶子链表继续查找
     return -1;
 }
 
@@ -535,7 +552,7 @@ void BPlusTree::insert_into_parent(IndexNode& old_node,
 
 
 page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction* transaction) {
-     if (is_unique()) {
+    if (is_unique()) {
         std::vector<Rid> existing;
         if (get_value(key, &existing, transaction) && !existing.empty()) {
             throw DuplicateKeyError();
@@ -547,26 +564,16 @@ page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction
 
     leaf->insert(key, value);
     leaf.mark_dirty();
+    // 最小修正（任务 2 前置缺陷）：插入新最小值会改变叶子的 key[0]，必须沿祖先链同步分隔键。
+    // 原实现只在函数末尾强改 root->key[0]，多层树中中间层内部结点的 key[0] 仍与子树最小值失配，
+    // 随机顺序 + 大量重复 key 连续分裂后就会破坏键序（duplicate_test::DuplicatesSpanManyLeaves）。
+    // update_ancestor_keys() 从叶子向上逐层校正，遇到已相等的分隔键即停止。
+    update_ancestor_keys(leaf);
     const page_id_t leaf_page_no = leaf->get_page_no();
 
     if (leaf->get_size() >= leaf->get_max_size()) {
         IndexNode new_leaf = split(leaf);
         insert_into_parent(leaf, new_leaf->get_key(0), new_leaf, transaction);
-    }
-
-    
-    if (file_header_->root_page_ != INDEX_NO_PAGE) {
-        IndexNode root = fetch_node(file_header_->root_page_);
-        if (root.valid() && !root->is_leaf_page()) {
-            // 顺着根节点的最左侧孩子 0 一路往下，找到真正的叶子最小 key
-            IndexNode curr = fetch_node(root->value_at(0));
-            while (!curr->is_leaf_page()) {
-                curr = fetch_node(curr->value_at(0));
-            }
-            // 强行覆盖根节点的 key[0]
-            root->set_key(0, curr->get_key(0));
-            root.mark_dirty();
-        }
     }
 
     return leaf_page_no;
@@ -580,11 +587,49 @@ page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction
  * @return 该 (key, rid) 存在并被删除时返回 true
  */
 bool BPlusTree::delete_entry(const char* key, const Rid& rid, Transaction* transaction) {
-    // Todo:
-    // 1. 获取 (key, rid) 所在的叶子结点；与 get_value 一样，它可能不在第一次找到的叶子里
-    // 2. 只删除这一条键值对（同一 key 的其他记录保留）
-    // 3. 如果删除成功需要调用 coalesce_or_redistribute 处理合并或重分配
+    // 1. 空树直接返回 false（root_page_ == INDEX_NO_PAGE）
+    if (is_empty()) {
+        return false;
+    }
 
+    // 2. 从整棵树第一个 >= key 的索引项开始查，而不是直接用 find_leaf_page()：
+    //    内部结点按 upper_bound 下降会落到「最右边可能含该 key」的叶子，
+    //    而普通索引中同一 key 的记录会分裂到多个相邻叶子，左侧叶子里也可能有它。
+    //    沿叶子链表向后遍历即可覆盖全部候选，同时不必扫描整棵树。
+    IndexPosition pos = lower_bound(key);
+    if (pos.page_no == INDEX_NO_PAGE) {
+        return false;
+    }
+
+    page_id_t page_no = pos.page_no;
+    while (page_no != INDEX_NO_PAGE && page_no != INDEX_LEAF_HEADER_PAGE) {
+        IndexNode leaf = fetch_node(page_no);
+        if (!leaf.valid()) {
+            return false;
+        }
+
+        // 3. remove() 同时匹配 key 与 Rid；返回删除后的 size，未找到返回 -1
+        const int new_size = leaf->remove(key, rid);
+        if (new_size >= 0) {
+            leaf.mark_dirty();
+            // 删掉首槽会改变叶子的最小 key，必须向上校正分隔键；
+            // size == 0 时不能读 get_key(0)，交给下面的下溢/根收缩处理。
+            if (new_size > 0) {
+                update_ancestor_keys(leaf);
+            }
+            coalesce_or_redistribute(leaf, transaction);
+            return true;
+        }
+
+        // 4. 本叶没有目标 rid：若本叶已有 key > target，后继叶的 key 只会更大，可提前判定不存在
+        const int leaf_size = leaf->get_size();
+        if (leaf_size > 0 &&
+            compare_index_key(leaf->get_key(leaf_size - 1), key, file_header_->column_types_,
+                              file_header_->column_lengths_) > 0) {
+            return false;
+        }
+        page_no = leaf->get_next_leaf();
+    }
     return false;
 }
 
@@ -600,17 +645,38 @@ bool BPlusTree::delete_entry(const char* key, const Rid& rid, Transaction* trans
  * Otherwise, merge(Coalesce).
  */
 bool BPlusTree::coalesce_or_redistribute(IndexNode& node, Transaction* transaction, bool* root_is_latched) {
-    // Todo:
-    // 1. 判断node结点是否为根节点
-    //    1.1 如果是根节点，需要调用AdjustRoot() 函数来进行处理，返回根节点是否需要被删除
-    //    1.2 如果不是根节点，并且不需要执行合并或重分配操作，则直接返回false，否则执行2
-    // 2. 获取node结点的父亲结点
-    // 3. 寻找node结点的兄弟结点（优先选取前驱结点）
-    // 4. 如果node结点和兄弟结点的键值对数量之和，能够支撑两个B+树结点（即node.size+neighbor.size >=
-    // NodeMinSize*2)，则只需要重新分配键值对（调用Redistribute函数）
-    // 5. 如果不满足上述条件，则需要合并两个结点，将右边的结点合并到左边的结点（调用Coalesce函数）
+    (void)root_is_latched;  // 任务 3 只做单线程正确性，根锁留给任务 4
 
-    return false;
+    // 1. 根结点不受 min_size 约束，只需判断是否要收缩或置空
+    if (node->is_root_page()) {
+        return adjust_root(node);
+    }
+    // 2. 未下溢则无需调整
+    if (node->get_size() >= node->get_min_size()) {
+        return false;
+    }
+
+    // 3. 取父结点，优先找前驱兄弟；node 是最左孩子时只能取后继
+    IndexNode parent = fetch_node(node->get_parent_page_no());
+    if (!parent.valid()) {
+        throw InternalError("coalesce_or_redistribute: failed to fetch parent");
+    }
+    const int index = parent->find_child(&node.node());
+    const int neighbor_index = (index == 0) ? 1 : index - 1;
+    if (neighbor_index >= parent->get_size()) {
+        throw InternalError("coalesce_or_redistribute: no sibling found");
+    }
+    IndexNode neighbor = fetch_node(parent->value_at(neighbor_index));
+    if (!neighbor.valid()) {
+        throw InternalError("coalesce_or_redistribute: failed to fetch sibling");
+    }
+
+    // 4. 两者条目总数能撑起两个半满结点 -> 借一个；否则合并成一个
+    if (node->get_size() + neighbor->get_size() >= 2 * node->get_min_size()) {
+        redistribute(neighbor, node, parent, index);
+        return false;
+    }
+    return coalesce(neighbor, node, parent, index, transaction, root_is_latched);
 }
 
 /**
@@ -620,11 +686,30 @@ bool BPlusTree::coalesce_or_redistribute(IndexNode& node, Transaction* transacti
  * @note size of root page can be less than min size and this method is only called within coalesce_or_redistribute()
  */
 bool BPlusTree::adjust_root(IndexNode& old_root_node) {
-    // Todo:
-    // 1. 如果old_root_node是内部结点，并且大小为1，则直接把它的孩子更新成新的根结点
-    // 2. 如果old_root_node是叶结点，且大小为0，则直接更新root page
-    // 3. 除了上述两种情况，不需要进行操作
-
+    // 情况 1：内部根只剩一个孩子 -> 把该孩子提升为新根，旧根页回收
+    if (!old_root_node->is_leaf_page() && old_root_node->get_size() == 1) {
+        const page_id_t child_page = old_root_node->value_at(0);
+        IndexNode new_root = fetch_node(child_page);
+        if (!new_root.valid()) {
+            throw InternalError("adjust_root: failed to fetch new root");
+        }
+        new_root->set_parent_page_no(INDEX_NO_PAGE);
+        new_root.mark_dirty();
+        set_root_page(child_page);
+        record_page_deletion();
+        return true;
+    }
+    // 情况 2：叶根被删空 -> 整棵树为空。
+    // 独立判断：实验文档建议把 root_page_ 置为 INVALID_PAGE_ID，但框架 insert_entry()
+    // 在 find_leaf_page() 返回空句柄时会抛 "failed to find leaf"，导致「删空后再插入」不可用；
+    // duplicate_test::RandomizedDuplicateWorkload 会真实触发该路径。
+    // 不变式检查器（b_plus_tree_invariant_checker.cpp:58-59）明确同时接受
+    // 「保留空根叶」与「root=INVALID_PAGE_ID」两种空树表示，因此这里保留这个空叶作为根页：
+    // 不置空 root_page_、不回收该页，first/last_leaf 与哨兵页、page_count_ 全部保持自洽。
+    if (old_root_node->is_leaf_page() && old_root_node->get_size() == 0) {
+        return false;
+    }
+    // 情况 3：其余情况根结点无需删除
     return false;
 }
 
@@ -643,11 +728,31 @@ bool BPlusTree::adjust_root(IndexNode& old_root_node) {
  * 注意更新parent结点的相关kv对
  */
 void BPlusTree::redistribute(IndexNode& neighbor_node, IndexNode& node, IndexNode& parent, int index) {
-    // Todo:
-    // 1. 通过index判断neighbor_node是否为node的前驱结点
-    // 2. 从neighbor_node中移动一个键值对到node结点中
-    // 3. 更新父节点中的相关信息，并且修改移动键值对对应孩字结点的父结点信息（update_child_parent函数）
-    // 注意：neighbor_node的位置不同，需要移动的键值对不同，需要分类讨论
+    // 约定：内部/叶结点的 key[i] 都是「第 i 个孩子子树的最小 key」，
+    // 因此移动一个键值对后，父结点中被改变最小 key 的那一侧分隔键必须同步改写。
+    if (index > 0) {
+        // neighbor 是前驱：借它的最后一个键值对，插到 node 头部
+        const int last = neighbor_node->get_size() - 1;
+        node->insert_pairs(0, neighbor_node->get_key(last), neighbor_node->get_rid(last), 1);
+        neighbor_node->erase_pair(last);
+        parent->set_key(index, node->get_key(0));
+        if (!node->is_leaf_page()) {
+            update_child_parent(node, 0);
+        }
+    } else {
+        // neighbor 是后继：借它的第一个键值对，追加到 node 尾部
+        node->insert_pairs(node->get_size(), neighbor_node->get_key(0), neighbor_node->get_rid(0), 1);
+        if (!node->is_leaf_page()) {
+            update_child_parent(node, node->get_size() - 1);
+        }
+        neighbor_node->erase_pair(0);
+        parent->set_key(index + 1, neighbor_node->get_key(0));
+    }
+    // 分隔键若落在父结点第 0 槽，还要继续向上传播到祖先
+    update_ancestor_keys(parent);
+    node.mark_dirty();
+    neighbor_node.mark_dirty();
+    parent.mark_dirty();
 }
 
 /**
@@ -672,12 +777,59 @@ bool BPlusTree::coalesce(IndexNode& neighbor_node,
                          int index,
                          Transaction* transaction,
                          bool* root_is_latched) {
-    // Todo:
-    // 1. 用index判断neighbor_node是否为node的前驱结点，若不是则交换两个结点，让neighbor_node作为左结点，node作为右结点
-    // 2. 把node结点的键值对移动到neighbor_node中，并更新node结点孩子结点的父节点信息（调用update_child_parent函数）
-    // 3. 释放和删除node结点，并删除parent中node结点的信息，返回parent是否需要被删除
-    // 提示：如果是叶子结点且为最右叶子结点，需要更新file_header_.last_leaf
+    // 1. 统一成「neighbor 在左、node 在右」。index==0 时 node 是最左孩子，
+    //    取到的兄弟其实是后继，交换后要删除的右结点就是原来的兄弟。
+    if (index == 0) {
+        std::swap(node, neighbor_node);
+        index = 1;
+    }
 
+    const int left_size = neighbor_node->get_size();
+    const int right_size = node->get_size();
+    const bool is_leaf = node->is_leaf_page();
+    const page_id_t deleted_page = node->get_page_no();
+
+    // 2. 右结点的全部键值对批量追加到左结点尾部（两页内存不重叠，可直接 memcpy）
+    if (right_size > 0) {
+        neighbor_node->insert_pairs(left_size, node->get_key(0), node->get_rid(0), right_size);
+    }
+    // 内部结点：被迁移的孩子必须把 parent 指针改指到左结点
+    if (!is_leaf) {
+        for (int i = 0; i < right_size; ++i) {
+            update_child_parent(neighbor_node, left_size + i);
+        }
+    }
+
+    // 3. 叶子：先摘链（unlink_leaf 会同步修改前驱/后继或哨兵页），再维护首尾叶指针
+    if (is_leaf) {
+        const page_id_t prev_leaf = node->get_prev_leaf();
+        const page_id_t next_leaf = node->get_next_leaf();
+        unlink_leaf(node);
+        if (file_header_->last_leaf_ == deleted_page) {
+            file_header_->last_leaf_ = prev_leaf;
+        }
+        if (file_header_->first_leaf_ == deleted_page) {
+            file_header_->first_leaf_ = next_leaf;
+        }
+    }
+
+    // 4. 父结点删除右结点对应的分隔键；左结点的最小 key 没变，其余分隔键无需改动
+    parent->erase_pair(index);
+    parent.mark_dirty();
+    neighbor_node.mark_dirty();
+    record_page_deletion();
+
+    // 5. 交出右结点的 pin 并把该页从缓冲池移除，避免孤儿页长期占帧
+    {
+        PageGuard released = node.release();
+        static_cast<void>(released.drop());
+    }
+    buffer_pool_manager_->delete_page(PageId{.fd = file_descriptor_, .page_no = deleted_page});
+
+    // 6. 父结点可能因此下溢，递归向上继续合并/重分配（或收缩根）
+    if (parent->get_size() < parent->get_min_size()) {
+        return coalesce_or_redistribute(parent, transaction, root_is_latched);
+    }
     return false;
 }
 
@@ -706,26 +858,33 @@ Rid BPlusTree::get_rid(const IndexPosition& position) const {
  *       IndexScan::next() 产生的位置直接比较。
  */
 IndexPosition BPlusTree::lower_bound(const char* key) {
-    // Todo:
-    // 1. 找到可能包含目标 key 的叶子，并在叶子内定位
-    // 2. 按上面的位置规范调整返回值
-    // 思考：非唯一索引中，“第一个 >= key”的索引项可能在哪个叶子里？
-
-    auto [leaf, found] = find_leaf_page(key, IndexOperation::Find, nullptr);
-    if (!found) {
-        // 空树时，直接返回占位符，调用者会处理
+    // 「第一个 >= key」必须从最左可能含该 key 的子树开始下降。
+    // find_leaf_page() 用 upper_bound 下降，重复 key 分裂到多个相邻叶子时会落到
+    // 最右侧含该 key 的叶子，漏掉左边叶子中的记录（duplicate_test 里 Lookup(7) 只返回 1 条）。
+    // 这里改用结点内 lower_bound 自行下降：内部结点 key[i] 是第 i 个孩子子树的最小 key，
+    // pos==0 进第 0 个孩子，pos>0 进第 pos-1 个孩子（最左可能含 key 的子树）。
+    if (is_empty()) {
         return {INDEX_NO_PAGE, -1};
+    }
+    IndexNode leaf = fetch_node(file_header_->root_page_);
+    if (!leaf.valid()) {
+        return {INDEX_NO_PAGE, -1};
+    }
+    while (!leaf->is_leaf_page()) {
+        const int pos = leaf->lower_bound(key);
+        const int child_idx = (pos == 0) ? 0 : pos - 1;
+        leaf = fetch_node(leaf->value_at(child_idx));
     }
 
     int slot = leaf->lower_bound(key);
-
+    // 位置规范：落在非最后叶子末尾要跳到下一叶第 0 槽；所有 key 都更小则返回 leaf_end()
     while (slot == leaf->get_size()) {
-        page_id_t next_page = leaf->get_next_leaf();
+        const page_id_t next_page = leaf->get_next_leaf();
         if (next_page == INDEX_LEAF_HEADER_PAGE || next_page == INDEX_NO_PAGE) {
             return leaf_end();
         }
         leaf = fetch_node(next_page);
-        slot = leaf->lower_bound(key); // 下一叶重新找（其实从0开始找即可，但通用写 lower_bound 也没问题）
+        slot = leaf->lower_bound(key);
     }
 
     return IndexPosition{leaf->get_page_no(), slot};
