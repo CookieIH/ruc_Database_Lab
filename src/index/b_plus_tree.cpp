@@ -364,6 +364,17 @@ std::pair<IndexNode, bool> BPlusTree::find_leaf_page(const char* key,
  * @note 非唯一索引中，同一 key 的记录可能因分裂分布在多个相邻叶子里。
  */
 bool BPlusTree::get_value(const char* key, std::vector<Rid>* result, Transaction* transaction) {
+    // 任务 4（方法一：粗粒度并发）：进入树操作前先抢整树互斥锁。
+    std::lock_guard<std::mutex> lock(root_latch_);
+    return get_value_unlocked(key, result, transaction);
+}
+
+/**
+ * @brief get_value 的无锁实现，调用方必须已持有 root_latch_。
+ * @note 独立抽出是因为 insert_entry 的唯一性检查会在已持锁状态下复用本逻辑，
+ *       若再走 get_value 会对同一把 std::mutex 二次加锁导致死锁。
+ */
+bool BPlusTree::get_value_unlocked(const char* key, std::vector<Rid>* result, Transaction* transaction) {
     // Todo:
     // 1. 获取目标 key 所在的叶子结点
     // 2. 找到该 key 的全部记录（非唯一索引可能有多条），把 rid 放入 result
@@ -552,9 +563,13 @@ void BPlusTree::insert_into_parent(IndexNode& old_node,
 
 
 page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction* transaction) {
+    // 任务 4（方法一：粗粒度并发）：插入全程持有整树互斥锁，防止并发写破坏结构。
+    std::lock_guard<std::mutex> lock(root_latch_);
+
     if (is_unique()) {
         std::vector<Rid> existing;
-        if (get_value(key, &existing, transaction) && !existing.empty()) {
+        // 已持有 root_latch_，必须走无锁版本，否则二次加锁死锁
+        if (get_value_unlocked(key, &existing, transaction) && !existing.empty()) {
             throw DuplicateKeyError();
         }
     }
@@ -587,6 +602,9 @@ page_id_t BPlusTree::insert_entry(const char* key, const Rid& value, Transaction
  * @return 该 (key, rid) 存在并被删除时返回 true
  */
 bool BPlusTree::delete_entry(const char* key, const Rid& rid, Transaction* transaction) {
+    // 任务 4（方法一：粗粒度并发）：删除（含下溢合并/重分配的级联调整）全程持锁。
+    std::lock_guard<std::mutex> lock(root_latch_);
+
     // 1. 空树直接返回 false（root_page_ == INDEX_NO_PAGE）
     if (is_empty()) {
         return false;
