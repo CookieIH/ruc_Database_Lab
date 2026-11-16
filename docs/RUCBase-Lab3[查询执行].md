@@ -48,6 +48,65 @@ python3 query_unit_test.py basic_query_test1.sql # 20分
 也可以在仓库根目录执行 `ctest --preset lab3-query`。
 
 
+## 看这里看这里 我说看这里你盐津瞎吗 实验二分给队友A和B一起做
+
+👨‍💻 队友 A：单表操作与索引维护（核心基石）
+负责文件：
+
+`src/execution/executor_seq_scan.h`
+`src/execution/executor_projection.h`
+`src/execution/executor_delete.h`
+`src/execution/executor_update.h`
+
+需要实现的接口：
+
+`SeqScanExecutor` (全表扫描)：`begin_tuple()`、`next_tuple()`、`next()`，以及必须补充 `is_end()`、`cols()`、`tuple_len()`。（提示：利用 Lab1 写好的 `RmScan`）
+`ProjectionExecutor` (投影)：`begin_tuple()`、`next_tuple()`、`next()`，以及必须补充 `is_end()`、`cols()`、`tuple_len()`。
+`DeleteExecutor` (删除)：`next()`。（提示：不仅要删记录，还要通过 delete_entry 维护 B+ 树索引）
+`UpdateExecutor` (更新)：`next()`。（提示：要维护索引；如果更新导致唯一键冲突，必须恢复原状并抛出 DuplicateKeyError）
+
+🎯 验收标准：跑通 `basic_query_test2.sql`、`test3.sql`、`test4.sql`、`test6.sql`。
+
+
+👨‍💻 队友 B：多表连接（逻辑攻坚）
+负责文件：
+
+`src/execution/executor_nestedloop_join.h`
+
+需要实现的接口：
+
+`NestedLoopJoinExecutor` (嵌套循环连接)：`begin_tuple()`、`next_tuple()`、`next()`，以及必须补充 `is_end()`、`cols()`、`tuple_len()`。
+
+⚠️ 关键提示：
+
+连接算子有 `left_` 和 `right_` 两个子算子。
+核心逻辑是双层循环。左孩子读一条记录，右孩子从头扫到尾。当右孩子扫完（`is_end()`）时，必须重置右孩子（重新调用右孩子的 `begin_tuple()`）。
+输出记录格式：左表记录拼接右表记录。
+
+🎯 验收标准：跑通 `basic_query_test5.sql`。
+
+
+👨‍💻 队友 C：排序与归并连接（算法挑战）
+负责文件：
+
+`src/execution/execution_sort.h`
+`src/execution/executor_merge_join.h`
+
+需要实现的接口：
+
+`SortExecutor` (排序)：`begin_tuple()`、`next_tuple()`、`next()`，以及必须补充 `is_end()`、`cols()`、`tuple_len()`。
+
+`MergeJoinExecutor` (归并连接)：`begin_tuple()`、`next_tuple()`、`next()`，以及必须补充 `is_end()`、`cols()`、`tuple_len()`。
+
+⚠️ 关键提示：
+
+排序：数据量小，直接在内存里用 std::vector 存下所有孩子的记录，用 std::sort 排序后，再一条条吐出去。
+
+归并：处理多对多匹配时，因为游标不能回头，必须用 vector 缓存住左右两边 key 相等的整组记录，然后做笛卡尔积输出。
+
+🎯 验收标准：跑通 `lab3_sort_executor_test`、`lab3_merge_join_test`、`basic_query_test7.sql`。
+
+
 ## 实验二：DML语句实现（60分）
 
 在本实验中，你需要完成src/execution文件夹下执行算子中的空缺函数，使得系统能够支持增删改查四种DML语句。
