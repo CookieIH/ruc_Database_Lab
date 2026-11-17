@@ -15,6 +15,7 @@
 #include "common/wire_result.h"
 #include "index/index_manager.h"
 #include "record/rm_manager.h"
+#include "record/rm_scan.h"
 #include "storage/buffer_pool_manager.h"
 #include "storage/disk_manager.h"
 
@@ -126,7 +127,44 @@ void SmManager::drop_db(const std::string& db_name) {
 
 void SmManager::open_db(const std::string& db_name) {
     // TODO(Lab 3): 加载数据库元数据，并打开所有表文件和索引文件。
-    throw NotImplementedError("SmManager::open_db (Lab 3)");
+    const fs::path db_path = database_path(db_name);
+    if (!fs::is_directory(db_path)) {
+        throw DatabaseNotFoundError(db_name);
+    }
+
+    // 1. 读取元数据文件
+    std::ifstream ifs(db_path / DB_META_NAME);
+    if (!ifs) {
+        throw InternalError("cannot open database metadata");
+    }
+    ifs >> db_;
+    ifs.close();
+
+    // 2. 切换到数据库目录
+    fs::current_path(db_path);
+
+    try {
+        // 3. 打开所有表文件
+        for (const auto& [tab_name, tab] : db_.tabs_) {
+            fhs_.emplace(tab_name, rm_manager_->open_file(tab_name));
+        }
+
+        // 4. 打开所有索引文件
+        for (const auto& [tab_name, tab] : db_.tabs_) {
+            for (const auto& index : tab.indexes) {
+                std::string ix_name = index_manager_->make_index_name(tab_name, index.cols);
+                // 用 index.cols 打开
+                indexes_.emplace(ix_name, index_manager_->open_index(tab_name, index.cols));
+            }
+        }
+    } catch (...) {
+        // 异常回滚
+        fhs_.clear();
+        indexes_.clear();
+        db_ = DbMeta();
+        fs::current_path(db_path.parent_path());
+        throw;
+    }
 }
 
 void SmManager::flush_meta() const { write_meta_file(DB_META_NAME, db_); }
@@ -135,7 +173,27 @@ void SmManager::show_database(Context* context) const { set_string_result(contex
 
 void SmManager::close_db() {
     // TODO(Lab 3): 刷盘并关闭所有表、索引和数据库元数据。
-    throw NotImplementedError("SmManager::close_db (Lab 3)");
+
+    if (db_.name_.empty()) {
+        return; 
+    }
+    
+    // 1. 刷盘
+    flush_meta();
+    
+    // 2. 关闭表文件（unique_ptr 析构自动处理）
+    fhs_.clear();
+    
+    // 3. 关闭索引文件（必须显式调用 close_index）
+    for (auto& [ix_name, ix] : indexes_) {
+        index_manager_->close_index(ix.get());
+    }
+    indexes_.clear();
+    
+    // 4. 清理元数据并切回上一级目录
+    db_.tabs_.clear();
+    db_.name_.clear();
+    fs::current_path("..");
 }
 
 void SmManager::show_tables(Context* context) {
@@ -238,7 +296,34 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
 
 void SmManager::drop_table(const std::string& tab_name, Context* context) {
     // TODO(Lab 3): 删除表的索引、记录文件、句柄和元数据。
-    throw NotImplementedError("SmManager::drop_table (Lab 3)");
+
+    // 1. 获取表元数据（如果不存在会抛异常）
+    const TabMeta& tab = db_.get_table(tab_name);
+
+    // 2. 收集并删除该表上所有的索引
+    std::vector<std::vector<std::string>> cols_to_drop;
+    for (const auto& index : tab.indexes) {
+        std::vector<std::string> col_names;
+        for (const auto& col : index.cols) {
+            col_names.push_back(col.name);
+        }
+        cols_to_drop.push_back(col_names);
+    }
+    for (const auto& cols : cols_to_drop) {
+        drop_index(tab_name, cols, context);
+    }
+
+    // 3. 关闭并删除表文件
+    auto it = fhs_.find(tab_name);
+    if (it != fhs_.end()) {
+        rm_manager_->close_file(it->second.get()); // 显式关闭
+        fhs_.erase(it); // 从 map 中移除
+    }
+    rm_manager_->destroy_file(tab_name); // 物理删除文件
+
+    // 4. 移除元数据并刷盘
+    db_.tabs_.erase(tab_name);
+    flush_meta();
 }
 
 void SmManager::create_index(const std::string& tab_name,
@@ -248,15 +333,94 @@ void SmManager::create_index(const std::string& tab_name,
     // TODO(Lab 3): 用 IndexMeta::make(表, 列, unique) 构造定义，再交给 IndexManager::create_index。
     // 表中已有的记录也要插入新索引。若声明了 UNIQUE 而已有数据存在重复 key，
     // 建索引应失败：清理已创建的索引文件和句柄，不修改元数据，再把异常抛给上层。
-    throw NotImplementedError("SmManager::create_index (Lab 3)");
+    const TabMeta& tab = db_.get_table(tab_name);
+
+    std::string ix_name = index_manager_->make_index_name(tab_name, col_names);
+    if (indexes_.contains(ix_name)) {
+        throw RMDBError("Index already exists: " + ix_name);
+    }
+
+    // 1. 提取 ColMeta
+    std::vector<ColMeta> cols;
+    cols.reserve(col_names.size());
+    for (const auto& col_name : col_names) {
+        cols.push_back(*tab.get_col(col_name));
+    }
+
+    // 2. 直接用框架提供的 make 方法构造元数据
+    IndexMeta index_meta = IndexMeta::make(tab_name, std::move(cols), unique);
+
+    // 3. 创建并打开索引文件
+    index_manager_->create_index(index_meta);
+    auto ix = index_manager_->open_index(tab_name, index_meta.cols);
+
+    // 4. 遍历已有表数据，批量插入索引
+    auto* fh = fhs_[tab_name].get();
+    RmScan scan(fh);
+    try {
+        for (; !scan.is_end(); scan.next()) {
+            Rid rid = scan.rid();
+            auto rec = fh->get_record(rid, context);
+
+            // 直接用框架提供的 make_key 提取键值，省去手动拼装
+            std::vector<char> key_data = index_meta.make_key(rec->data);
+            
+            // 如果是 unique 且冲突，底层 B+ 树会抛异常
+            ix->insert_entry(key_data.data(), rid, nullptr);
+        }
+    } catch (...) {
+        // 【核心回滚】冲突或异常，关闭文件、销毁文件、抛错
+        index_manager_->close_index(ix.get());
+        index_manager_->destroy_index(tab_name, index_meta.cols);
+        throw;
+    }
+
+    // 5. 成功后更新内存元数据和句柄
+    indexes_.emplace(ix_name, std::move(ix));
+    
+    TabMeta& mutable_tab = db_.tabs_[tab_name];
+    mutable_tab.indexes.push_back(index_meta);
+    flush_meta();
 }
 
 void SmManager::drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
     // TODO(Lab 3): 关闭并删除索引，同时维护索引元数据。
-    throw NotImplementedError("SmManager::drop_index (Lab 3)");
+    std::string ix_name = index_manager_->make_index_name(tab_name, col_names);
+    
+    auto it = indexes_.find(ix_name);
+    if (it == indexes_.end()) {
+        throw RMDBError("Index does not exist: " + ix_name);
+    }
+
+    // 1. 关闭句柄，删除物理文件
+    index_manager_->close_index(it->second.get());
+    indexes_.erase(it);
+    index_manager_->destroy_index(tab_name, col_names);
+
+    // 2. 从元数据中移除
+    TabMeta& tab = db_.tabs_[tab_name];
+    auto& idxs = tab.indexes;
+    idxs.erase(std::remove_if(idxs.begin(), idxs.end(), [&](const IndexMeta& idx) {
+        if (idx.cols.size() != col_names.size()) return false;
+        for (size_t i = 0; i < col_names.size(); ++i) {
+            if (idx.cols[i].name != col_names[i]) return false;
+        }
+        return true;
+    }), idxs.end());
+
+    // 3. 刷盘
+    flush_meta();
 }
 
 void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMeta>& cols, Context* context) {
     // TODO(Lab 3): 与按字段名删除索引的重载共享核心逻辑。
-    throw NotImplementedError("SmManager::drop_index (Lab 3)");
+
+    // 框架本身就有接收 vector<ColMeta> 的 make_index_name 和 destroy_index
+    // 我们提取出 col_names 然后转调上面的函数即可
+    std::vector<std::string> col_names;
+    col_names.reserve(cols.size());
+    for (const auto& col : cols) {
+        col_names.push_back(col.name);
+    }
+    drop_index(tab_name, col_names, context);
 }

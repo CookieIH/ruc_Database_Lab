@@ -1,6 +1,6 @@
 # ide
 .idea/
-.vscode/
+.vscode/setting.json
 
 # macos
 .DS_Store
@@ -34,3 +34,8 @@ CMakeUserPresets.json
 deps/*
 !deps/nlohmann/
 .dockerignore
+
+ .vscode/setting.json
+src/storage/buffer_pool_manager.cpp
+page_guard_test.db
+*Test_db

@@ -97,6 +97,8 @@ public:
 
     void set_parent_page_no(page_id_t parent) { page_header_->parent_page = parent; }
 
+    void set_is_leaf(bool is_leaf) { page_header_->is_leaf = is_leaf; }// 增添
+
     char* get_key(int key_idx) const {
         return keys_ + static_cast<std::ptrdiff_t>(key_idx) * file_header_->key_length_;
     }
@@ -205,6 +207,14 @@ private:
     BufferPoolManager* buffer_pool_manager_;        ///< 非拥有指针。
     int file_descriptor_;                           ///< 索引文件描述符。
     std::unique_ptr<IndexFileHeader> file_header_;  ///< 独占的内存文件头副本。
+    /**
+     * 任务 4（方法一：粗粒度并发）：整棵树共享一把互斥锁。
+     * 所有从外部进入树操作的公开入口（get_value / insert_entry / delete_entry）
+     * 都必须先持有本锁再触碰任何节点，保证同一时刻只有一个线程访问 B+ 树，
+     * 从而在并发插入、删除、查找下维持键序与结构不变式。
+     * 注意：std::mutex 不可重入，内部路径严禁再次对本树加锁，
+     * 需要复用逻辑时改调 *_unlocked 版本（见 get_value_unlocked）。
+     */
     std::mutex root_latch_;
 
 public:
@@ -213,9 +223,7 @@ public:
     ~BPlusTree() = default;
 
     // for search
-    bool get_value(const char* key, std::vector<Rid>* result, Transaction* transaction);
-
-    std::pair<IndexNode, bool> find_leaf_page(const char* key,
+    bool get_value(const char* key, std::vector<Rid>* result, Transaction* transaction);    std::pair<IndexNode, bool> find_leaf_page(const char* key,
                                               IndexOperation operation,
                                               Transaction* transaction,
                                               bool find_first = false);
@@ -269,4 +277,11 @@ public:
 private:
     void set_root_page(page_id_t root) { file_header_->root_page_ = root; }
     [[nodiscard]] bool is_empty() const { return file_header_->root_page_ == INDEX_NO_PAGE; }
+
+    /**
+     * @brief get_value 的无锁版本。
+     * @note 任务 4 粗粒度并发：仅供已持有 root_latch_ 的内部路径（如
+     * insert_entry 的唯一性检查）复用，外部入口一律调 get_value。
+     */
+    bool get_value_unlocked(const char* key, std::vector<Rid>* result, Transaction* transaction);
 };
