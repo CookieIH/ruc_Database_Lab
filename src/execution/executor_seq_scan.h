@@ -16,6 +16,7 @@
 #include "executor_abstract.h"
 #include "record/rm_defs.h"
 #include "record/rm_file_handle.h"
+#include "record/rm_scan.h" // 引入 RmScan
 #include "system/sm_manager.h"
 #include "system/sm_meta.h"
 
@@ -52,27 +53,133 @@ public:
      * @brief 构建表迭代器scan_,并开始迭代扫描,直到扫描到第一个满足谓词条件的元组停止,并赋值给rid_
      *
      */
-    void begin_tuple() override { throw NotImplementedError("SeqScanExecutor::begin_tuple"); }
+    void begin_tuple() override {
+        // 1. 从表的表头开始创建扫描器
+        scan_ = std::make_unique<RmScan>(fh_);
+        // 2. 找一个满足条件的记录
+        next_tuple(); 
+    }
 
     /**
      * @brief 从当前scan_指向的记录开始迭代扫描,直到扫描到第一个满足谓词条件的元组停止,并赋值给rid_
      *
      */
-    void next_tuple() override { throw NotImplementedError("SeqScanExecutor::next_tuple"); }
+    void next_tuple() override {
+        if (scan_ == nullptr) return;
+
+        for (; !scan_->is_end(); scan_->next()) {
+            Rid current_rid = scan_->rid();
+            auto record = fh_->get_record(current_rid, context_);
+            
+            bool match = true;
+            for (const auto& cond : fed_conds_) {
+                auto col_it = std::find_if(cols_.begin(), cols_.end(), [&](const ColMeta& c) {
+                    return c.name == cond.lhs_col.col_name;
+                });
+                if (col_it == cols_.end()) continue;
+
+                char* rec_val = record->data + col_it->offset;
+                int cmp = 0;
+                
+                if (col_it->type == TYPE_INT) {
+                    int val;
+                    memcpy(&val, rec_val, sizeof(int));
+                    int cond_val;
+                    if (cond.is_rhs_val) {
+                        memcpy(&cond_val, cond.rhs_val.raw->data, sizeof(int));
+                    } else {
+                        auto rhs_col_it = std::find_if(cols_.begin(), cols_.end(), [&](const ColMeta& c) {
+                            return c.name == cond.rhs_col.col_name;
+                        });
+                        memcpy(&cond_val, record->data + rhs_col_it->offset, sizeof(int));
+                    }
+                    cmp = (val < cond_val) ? -1 : ((val > cond_val) ? 1 : 0);
+                } else if (col_it->type == TYPE_FLOAT) {
+                    float val, cond_val;
+                    memcpy(&val, rec_val, sizeof(float));
+                    if (cond.is_rhs_val) {
+                        memcpy(&cond_val, cond.rhs_val.raw->data, sizeof(float));
+                    } else {
+                        auto rhs_col_it = std::find_if(cols_.begin(), cols_.end(), [&](const ColMeta& c) {
+                            return c.name == cond.rhs_col.col_name;
+                        });
+                        memcpy(&cond_val, record->data + rhs_col_it->offset, sizeof(float));
+                    }
+                    cmp = (val < cond_val) ? -1 : ((val > cond_val) ? 1 : 0);
+                } else if (col_it->type == TYPE_STRING) {
+                    std::string val(rec_val, col_it->len);
+                    std::string cond_val;
+                    if (cond.is_rhs_val) {
+                        cond_val.assign(cond.rhs_val.raw->data, cond.rhs_val.raw->size);
+                    } else {
+                        auto rhs_col_it = std::find_if(cols_.begin(), cols_.end(), [&](const ColMeta& c) {
+                            return c.name == cond.rhs_col.col_name;
+                        });
+                        cond_val.assign(record->data + rhs_col_it->offset, rhs_col_it->len);
+                    }
+                    val = val.c_str();
+                    cond_val = cond_val.c_str();
+                    cmp = val.compare(cond_val);
+                }
+
+                bool this_match = false;
+                switch (cond.op) {
+                    case OP_EQ: this_match = (cmp == 0); break;
+                    case OP_NE: this_match = (cmp != 0); break;
+                    case OP_LT: this_match = (cmp < 0); break;
+                    case OP_GT: this_match = (cmp > 0); break;
+                    case OP_LE: this_match = (cmp <= 0); break;
+                    case OP_GE: this_match = (cmp >= 0); break;
+                }
+                if (!this_match) {
+                    match = false;
+                    break; 
+                }
+            }
+
+            if (match) {
+                rid_ = current_rid;
+                scan_->next(); 
+                return;
+            }
+        }
+        
+        rid_ = {.page_no = INVALID_PAGE_ID, .slot_no = -1};
+    }
 
     /**
      * @brief 返回下一个满足扫描条件的记录
      *
      * @return std::unique_ptr<RmRecord>
      */
-    std::unique_ptr<RmRecord> next() override { throw NotImplementedError("SeqScanExecutor::next"); }
+    
 
-    size_t tuple_len() const override { throw NotImplementedError("Lab 3 sequential scan executor"); }
+    /**
+     * @brief 返回下一个满足扫描条件的记录
+     *
+     * @return std::unique_ptr<RmRecord>
+     */
+    std::unique_ptr<RmRecord> next() override { 
+        if (is_end()) return nullptr;
+        return fh_->get_record(rid_, context_); 
+    }
 
-    const std::vector<ColMeta>& cols() const override { throw NotImplementedError("Lab 3 sequential scan executor"); }
+    size_t tuple_len() const override { return len_;  }
+
+    const std::vector<ColMeta>& cols() const override { return cols_;  }
 
     ColMeta get_col_offset(const TabCol& target) override {
-        throw NotImplementedError("Lab 3 sequential scan executor");
+         auto it = std::find_if(cols_.begin(), cols_.end(), [&](const ColMeta& c) {
+            return c.name == target.col_name;
+        });
+        if (it == cols_.end()) {
+            throw ColumnNotFoundError(target.col_name);
+        }
+        return *it;
+    }
+
+    bool is_end() const override {
+        return rid_.page_no == INVALID_PAGE_ID;
     }
 
     Rid& rid() override { return rid_; }
